@@ -1,0 +1,193 @@
+name: Build and test OP Kiosk OS 1.1
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - build.sh
+      - patch-v1.1.py
+      - .github/workflows/build-v1.1.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  ISO_NAME: OP-Kiosk-OS-1.1-amd64.iso
+  RELEASE_TAG: op-kiosk-os-1.1
+
+jobs:
+  build-test-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Получение исходников
+        uses: actions/checkout@v4
+
+      - name: Применение исправлений версии 1.1
+        run: |
+          set -euxo pipefail
+          python3 patch-v1.1.py
+          grep -F 'VERSION="1.1"' build.sh
+          grep -F -- '--disable-gpu' build.sh
+          grep -F '/etc/xdg/openbox/menu.xml' build.sh
+          bash -n build.sh
+
+      - name: Сборка ISO в Debian 13
+        run: |
+          set -euxo pipefail
+          docker run --rm --privileged \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            debian:trixie \
+            bash -lc "sed -i '/--boot-timeout 1/d' build.sh; chmod +x build.sh; ./build.sh"
+
+      - name: Проверка ISO и освобождение места
+        run: |
+          set -euxo pipefail
+          sudo chown -R "$USER:$USER" output
+          test -s "output/$ISO_NAME"
+          cd output
+          sha256sum "$ISO_NAME" > "${ISO_NAME}.sha256"
+          sha256sum -c "${ISO_NAME}.sha256"
+          file "$ISO_NAME"
+          ls -lh "$ISO_NAME" "${ISO_NAME}.sha256"
+          cd ..
+          sudo rm -rf .build
+          docker system prune -af || true
+          df -h /
+
+      - name: Извлечение live-системы для проверки запуска браузера
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xorriso squashfs-tools
+          mkdir -p runtime-test
+          xorriso -osirrox on \
+            -indev "output/$ISO_NAME" \
+            -extract /live/filesystem.squashfs runtime-test/filesystem.squashfs
+          sudo unsquashfs -d runtime-test/rootfs runtime-test/filesystem.squashfs
+          test -x runtime-test/rootfs/opt/op-kiosk/start-browser.sh
+          test -x runtime-test/rootfs/usr/bin/chromium
+          grep -F -- '--disable-gpu' runtime-test/rootfs/opt/op-kiosk/start-browser.sh
+          grep -F '<file>/etc/xdg/openbox/menu.xml</file>' runtime-test/rootfs/etc/openbox/rc.xml
+
+      - name: Реальный X11-тест Chromium из собранного SquashFS
+        run: |
+          set -Eeuxo pipefail
+          ROOT="$GITHUB_WORKSPACE/runtime-test/rootfs"
+          cleanup() {
+            sudo chroot "$ROOT" /usr/bin/pkill -9 -u kiosk chromium 2>/dev/null || true
+            sudo chroot "$ROOT" /usr/bin/pkill -9 -u kiosk openbox 2>/dev/null || true
+            sudo chroot "$ROOT" /usr/bin/pkill -9 Xvfb 2>/dev/null || true
+            mountpoint -q "$ROOT/dev" && sudo umount -R "$ROOT/dev" || true
+            mountpoint -q "$ROOT/sys" && sudo umount -R "$ROOT/sys" || true
+            mountpoint -q "$ROOT/proc" && sudo umount "$ROOT/proc" || true
+          }
+          trap cleanup EXIT
+
+          sudo mount -t proc proc "$ROOT/proc"
+          sudo mount --rbind /dev "$ROOT/dev"
+          sudo mount --make-rslave "$ROOT/dev"
+          sudo mount --rbind /sys "$ROOT/sys"
+          sudo mount --make-rslave "$ROOT/sys"
+
+          sudo chroot "$ROOT" /usr/bin/Xvfb :99 \
+            -screen 0 1280x720x24 -ac -nolisten tcp \
+            >/tmp/op-kiosk-xvfb.log 2>&1 &
+          sleep 2
+
+          sudo chroot "$ROOT" /usr/sbin/runuser -u kiosk -- \
+            /usr/bin/env HOME=/home/kiosk DISPLAY=:99 XDG_RUNTIME_DIR=/path/that/does/not/exist \
+            /usr/bin/openbox --config-file /etc/openbox/rc.xml \
+            >/tmp/op-kiosk-openbox-test.log 2>&1 &
+          sleep 1
+
+          sudo chroot "$ROOT" /usr/sbin/runuser -u kiosk -- \
+            /usr/bin/env HOME=/home/kiosk DISPLAY=:99 XDG_RUNTIME_DIR=/path/that/does/not/exist OPKIOSK_SMOKETEST=1 \
+            /opt/op-kiosk/start-browser.sh \
+            >/tmp/op-kiosk-launcher-test.log 2>&1 &
+
+          ok=0
+          for _ in $(seq 1 70); do
+            if sudo chroot "$ROOT" /usr/bin/curl -fsS --max-time 2 \
+              http://127.0.0.1:9222/json/list \
+              >runtime-test/chromium-pages.json 2>/dev/null; then
+              if grep -q 'OP Kiosk OS' runtime-test/chromium-pages.json; then
+                ok=1
+                break
+              fi
+            fi
+            sleep 1
+          done
+
+          sudo cp /tmp/op-kiosk-xvfb.log runtime-test/xvfb.log 2>/dev/null || true
+          sudo cp /tmp/op-kiosk-openbox-test.log runtime-test/openbox.log 2>/dev/null || true
+          sudo cp /tmp/op-kiosk-launcher-test.log runtime-test/launcher.log 2>/dev/null || true
+          sudo cp "$ROOT/tmp/op-kiosk-browser.log" runtime-test/browser.log 2>/dev/null || true
+          sudo chown -R "$USER:$USER" runtime-test
+
+          if [[ $ok -ne 1 ]]; then
+            echo 'Chromium не открыл стартовую страницу OP Kiosk OS.' >&2
+            for f in runtime-test/*.log runtime-test/chromium-pages.json; do
+              [[ -f "$f" ]] && { echo "===== $f ====="; tail -200 "$f"; }
+            done
+            exit 1
+          fi
+
+          pgrep_output="$(sudo chroot "$ROOT" /usr/bin/pgrep -a -u kiosk chromium || true)"
+          test -n "$pgrep_output"
+          printf '%s\n' "$pgrep_output" > runtime-test/chromium-processes.txt
+          printf 'OPKIOSK_X11_BROWSER_TEST=PASS\n' > runtime-test/test-result.txt
+          cat runtime-test/chromium-pages.json
+          cat runtime-test/test-result.txt
+
+      - name: Публикация проверочного отчёта
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-1.1-runtime-test
+          path: |
+            runtime-test/test-result.txt
+            runtime-test/chromium-pages.json
+            runtime-test/chromium-processes.txt
+            runtime-test/browser.log
+            runtime-test/openbox.log
+            runtime-test/launcher.log
+            runtime-test/xvfb.log
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Публикация ISO как артефакта
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-1.1-amd64
+          path: |
+            output/OP-Kiosk-OS-1.1-amd64.iso
+            output/OP-Kiosk-OS-1.1-amd64.iso.sha256
+            output/iso-boot-report.txt
+            output/iso-live-files.txt
+            output/iso-file-info.txt
+            output/build.log
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Создание релиза только после успешного запуска Chromium
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "OP Kiosk OS 1.1 для HP t530 — исправление запуска браузера" \
+              --notes "Исправлена первая нерабочая сборка: Chromium теперь запускается через гарантированно доступный runtime-каталог, добавлен безопасный повтор без sandbox при раннем отказе, принудительный X11/software rendering и отключено стандартное меню Openbox. Перед публикацией Chromium реально запускается из собранного SquashFS под Xvfb, а стартовая страница проверяется через DevTools endpoint."
+          fi
+
+          gh release upload "$RELEASE_TAG" \
+            "output/$ISO_NAME#OP Kiosk OS 1.1 — загрузочный ISO" \
+            "output/${ISO_NAME}.sha256#SHA-256 контрольная сумма" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
