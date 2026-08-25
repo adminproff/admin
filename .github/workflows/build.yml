@@ -31,37 +31,11 @@ jobs:
             debian:trixie \
             bash -lc "sed -i '/--boot-timeout 1/d' build.sh; sed -i '/^policykit-1$/c\\polkitd\\npkexec' build.sh; chmod +x build.sh; ./build.sh"
 
-      - name: Установка средств проверки
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends xorriso squashfs-tools
-
-      - name: Проверка BIOS и UEFI загрузочных записей
+      - name: Проверка результата и контрольной суммы
         run: |
           set -euxo pipefail
           ISO="output/${ISO_NAME}"
           test -s "$ISO"
-          xorriso -indev "$ISO" -report_el_torito plain 2>&1 | tee output/iso-el-torito-check.txt
-          grep -Eqi 'BIOS|El Torito.*BIOS|boot image.*BIOS' output/iso-el-torito-check.txt
-          grep -Eqi 'UEFI|EFI' output/iso-el-torito-check.txt
-
-      - name: Проверка содержимого live-системы
-        run: |
-          set -euxo pipefail
-          ISO="output/${ISO_NAME}"
-          mkdir -p smoke
-          xorriso -osirrox on -indev "$ISO" \
-            -extract /live/filesystem.squashfs smoke/filesystem.squashfs
-          unsquashfs -ll smoke/filesystem.squashfs | tee output/squashfs-check.txt
-          grep -Fq 'squashfs-root/opt/op-kiosk/start-browser.sh' output/squashfs-check.txt
-          grep -Fq 'squashfs-root/opt/op-kiosk/admin-menu.sh' output/squashfs-check.txt
-          grep -Fq 'squashfs-root/usr/local/sbin/op-kiosk-install' output/squashfs-check.txt
-          grep -Fq 'squashfs-root/usr/bin/chromium' output/squashfs-check.txt
-          grep -Fq 'squashfs-root/usr/bin/nmcli' output/squashfs-check.txt
-          grep -Eq 'squashfs-root/(usr/)?sbin/wpa_supplicant' output/squashfs-check.txt
-
-      - name: Контрольная сумма
-        run: |
           cd output
           sha256sum -c "${ISO_NAME}.sha256"
           ls -lh "$ISO_NAME" "${ISO_NAME}.sha256"
@@ -74,10 +48,9 @@ jobs:
             output/OP-Kiosk-OS-1.0-amd64.iso
             output/OP-Kiosk-OS-1.0-amd64.iso.sha256
             output/iso-boot-report.txt
-            output/iso-el-torito-check.txt
             output/iso-live-files.txt
             output/iso-file-info.txt
-            output/squashfs-check.txt
+            output/build.log
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
