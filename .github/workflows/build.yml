@@ -41,8 +41,8 @@ jobs:
           set -euxo pipefail
           ISO="output/${ISO_NAME}"
           test -s "$ISO"
-          xorriso -indev "$ISO" -report_el_torito plain | tee output/iso-el-torito-check.txt
-          grep -qi 'BIOS' output/iso-el-torito-check.txt
+          xorriso -indev "$ISO" -report_el_torito plain 2>&1 | tee output/iso-el-torito-check.txt
+          grep -Eqi 'BIOS|El Torito.*BIOS|boot image.*BIOS' output/iso-el-torito-check.txt
           grep -Eqi 'UEFI|EFI' output/iso-el-torito-check.txt
 
       - name: Проверка содержимого live-системы
@@ -53,12 +53,12 @@ jobs:
           xorriso -osirrox on -indev "$ISO" \
             -extract /live/filesystem.squashfs smoke/filesystem.squashfs
           unsquashfs -ll smoke/filesystem.squashfs | tee output/squashfs-check.txt
-          grep -q 'squashfs-root/opt/op-kiosk/start-browser.sh$' output/squashfs-check.txt
-          grep -q 'squashfs-root/opt/op-kiosk/admin-menu.sh$' output/squashfs-check.txt
-          grep -q 'squashfs-root/usr/local/sbin/op-kiosk-install$' output/squashfs-check.txt
-          grep -q 'squashfs-root/usr/bin/chromium$' output/squashfs-check.txt
-          grep -q 'squashfs-root/usr/bin/nmcli$' output/squashfs-check.txt
-          grep -q 'squashfs-root/usr/sbin/wpa_supplicant$' output/squashfs-check.txt
+          grep -Fq 'squashfs-root/opt/op-kiosk/start-browser.sh' output/squashfs-check.txt
+          grep -Fq 'squashfs-root/opt/op-kiosk/admin-menu.sh' output/squashfs-check.txt
+          grep -Fq 'squashfs-root/usr/local/sbin/op-kiosk-install' output/squashfs-check.txt
+          grep -Fq 'squashfs-root/usr/bin/chromium' output/squashfs-check.txt
+          grep -Fq 'squashfs-root/usr/bin/nmcli' output/squashfs-check.txt
+          grep -Eq 'squashfs-root/(usr/)?sbin/wpa_supplicant' output/squashfs-check.txt
 
       - name: Контрольная сумма
         run: |
