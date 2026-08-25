@@ -34,6 +34,7 @@ jobs:
       - name: Проверка результата и контрольной суммы
         run: |
           set -euxo pipefail
+          sudo chown -R "$USER:$USER" output
           ISO="output/${ISO_NAME}"
           test -s "$ISO"
           cd output
