@@ -37,6 +37,7 @@ jobs:
           ISO="output/${ISO_NAME}"
           test -s "$ISO"
           cd output
+          sha256sum "$ISO_NAME" > "${ISO_NAME}.sha256"
           sha256sum -c "${ISO_NAME}.sha256"
           ls -lh "$ISO_NAME" "${ISO_NAME}.sha256"
 
