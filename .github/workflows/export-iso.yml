@@ -1,0 +1,100 @@
+name: Export OP Kiosk ISO in downloadable parts
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - .github/workflows/export-iso.yml
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  SOURCE_RUN_ID: "32849252416"
+  SOURCE_ARTIFACT: OP-Kiosk-OS-1.0-amd64
+  ISO_NAME: OP-Kiosk-OS-1.0-amd64.iso
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Скачать проверенный артефакт сборки
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          mkdir -p source staging
+          gh run download "$SOURCE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$SOURCE_ARTIFACT" \
+            --dir source
+          find source -maxdepth 3 -type f -printf '%p %s bytes\n' | sort
+
+      - name: Повторно проверить ISO и разделить на части
+        run: |
+          set -euxo pipefail
+          ISO_PATH="$(find source -type f -name "$ISO_NAME" -print -quit)"
+          SHA_PATH="$(find source -type f -name "${ISO_NAME}.sha256" -print -quit)"
+          test -n "$ISO_PATH"
+          test -n "$SHA_PATH"
+          cp "$ISO_PATH" "staging/$ISO_NAME"
+          cp "$SHA_PATH" "staging/${ISO_NAME}.sha256"
+          cd staging
+          sha256sum -c "${ISO_NAME}.sha256"
+          split -b 350M -d -a 2 \
+            --additional-suffix=.bin \
+            "$ISO_NAME" \
+            "${ISO_NAME}.part-"
+          test -s "${ISO_NAME}.part-00.bin"
+          test -s "${ISO_NAME}.part-01.bin"
+          test -s "${ISO_NAME}.part-02.bin"
+          test -s "${ISO_NAME}.part-03.bin"
+          ls -lh "$ISO_NAME" "${ISO_NAME}.sha256" "${ISO_NAME}.part-"*.bin
+
+      - name: Загрузить часть 1 из 4
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-ISO-part-00
+          path: staging/OP-Kiosk-OS-1.0-amd64.iso.part-00.bin
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Загрузить часть 2 из 4
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-ISO-part-01
+          path: staging/OP-Kiosk-OS-1.0-amd64.iso.part-01.bin
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Загрузить часть 3 из 4
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-ISO-part-02
+          path: staging/OP-Kiosk-OS-1.0-amd64.iso.part-02.bin
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Загрузить часть 4 из 4
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-ISO-part-03
+          path: staging/OP-Kiosk-OS-1.0-amd64.iso.part-03.bin
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Загрузить контрольную сумму
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-ISO-checksum
+          path: staging/OP-Kiosk-OS-1.0-amd64.iso.sha256
+          if-no-files-found: error
+          retention-days: 30
