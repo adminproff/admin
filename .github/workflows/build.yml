@@ -1,0 +1,96 @@
+name: Build OP Kiosk OS
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - build.sh
+      - .github/workflows/build.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ISO_NAME: OP-Kiosk-OS-1.0-amd64.iso
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Получение исходников
+        uses: actions/checkout@v4
+
+      - name: Сборка в Debian 13
+        run: |
+          docker run --rm --privileged \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            debian:trixie \
+            bash -lc 'chmod +x build.sh && ./build.sh'
+
+      - name: Установка средств проверки
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xorriso qemu-system-x86
+
+      - name: Проверка BIOS и UEFI загрузочных записей
+        run: |
+          set -euxo pipefail
+          ISO="output/${ISO_NAME}"
+          test -s "$ISO"
+          xorriso -indev "$ISO" -report_el_torito plain | tee output/iso-el-torito-check.txt
+          grep -qi 'BIOS' output/iso-el-torito-check.txt
+          grep -Eqi 'UEFI|EFI' output/iso-el-torito-check.txt
+
+      - name: Загрузочный smoke-test ядра и live-системы
+        run: |
+          set -euxo pipefail
+          ISO="output/${ISO_NAME}"
+          mkdir -p smoke
+          xorriso -osirrox on -indev "$ISO" -extract /live/vmlinuz smoke/vmlinuz
+          xorriso -osirrox on -indev "$ISO" -extract /live/initrd.img smoke/initrd.img
+
+          set +e
+          timeout 240s qemu-system-x86_64 \
+            -machine accel=tcg \
+            -m 1536 \
+            -smp 2 \
+            -kernel smoke/vmlinuz \
+            -initrd smoke/initrd.img \
+            -append 'boot=live components username=kiosk hostname=op-kiosk locales=ru_RU.UTF-8 console=ttyS0,115200n8 opkiosk.smoketest=1' \
+            -drive file="$ISO",media=cdrom,readonly=on \
+            -nographic \
+            -no-reboot \
+            > output/qemu-smoke.log 2>&1
+          QEMU_RC=$?
+          set -e
+
+          cat output/qemu-smoke.log
+          grep -q 'OPKIOSK_BOOT_OK' output/qemu-smoke.log
+          echo "QEMU exit code: $QEMU_RC" | tee output/qemu-result.txt
+
+      - name: Контрольная сумма
+        run: |
+          cd output
+          sha256sum -c "${ISO_NAME}.sha256"
+          ls -lh "$ISO_NAME" "${ISO_NAME}.sha256"
+
+      - name: Публикация готового образа
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-1.0-amd64
+          path: |
+            output/OP-Kiosk-OS-1.0-amd64.iso
+            output/OP-Kiosk-OS-1.0-amd64.iso.sha256
+            output/iso-boot-report.txt
+            output/iso-el-torito-check.txt
+            output/iso-live-files.txt
+            output/iso-file-info.txt
+            output/qemu-smoke.log
+            output/qemu-result.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
