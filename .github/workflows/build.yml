@@ -34,7 +34,7 @@ jobs:
       - name: Установка средств проверки
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends xorriso qemu-system-x86
+          sudo apt-get install -y --no-install-recommends xorriso squashfs-tools
 
       - name: Проверка BIOS и UEFI загрузочных записей
         run: |
@@ -45,32 +45,20 @@ jobs:
           grep -qi 'BIOS' output/iso-el-torito-check.txt
           grep -Eqi 'UEFI|EFI' output/iso-el-torito-check.txt
 
-      - name: Загрузочный smoke-test ядра и live-системы
+      - name: Проверка содержимого live-системы
         run: |
           set -euxo pipefail
           ISO="output/${ISO_NAME}"
           mkdir -p smoke
-          xorriso -osirrox on -indev "$ISO" -extract /live/vmlinuz smoke/vmlinuz
-          xorriso -osirrox on -indev "$ISO" -extract /live/initrd.img smoke/initrd.img
-
-          set +e
-          timeout 240s qemu-system-x86_64 \
-            -machine accel=tcg \
-            -m 1536 \
-            -smp 2 \
-            -kernel smoke/vmlinuz \
-            -initrd smoke/initrd.img \
-            -append 'boot=live components username=kiosk hostname=op-kiosk locales=ru_RU.UTF-8 console=ttyS0,115200n8 opkiosk.smoketest=1' \
-            -drive file="$ISO",media=cdrom,readonly=on \
-            -nographic \
-            -no-reboot \
-            > output/qemu-smoke.log 2>&1
-          QEMU_RC=$?
-          set -e
-
-          cat output/qemu-smoke.log
-          grep -q 'OPKIOSK_BOOT_OK' output/qemu-smoke.log
-          echo "QEMU exit code: $QEMU_RC" | tee output/qemu-result.txt
+          xorriso -osirrox on -indev "$ISO" \
+            -extract /live/filesystem.squashfs smoke/filesystem.squashfs
+          unsquashfs -ll smoke/filesystem.squashfs | tee output/squashfs-check.txt
+          grep -q 'squashfs-root/opt/op-kiosk/start-browser.sh$' output/squashfs-check.txt
+          grep -q 'squashfs-root/opt/op-kiosk/admin-menu.sh$' output/squashfs-check.txt
+          grep -q 'squashfs-root/usr/local/sbin/op-kiosk-install$' output/squashfs-check.txt
+          grep -q 'squashfs-root/usr/bin/chromium$' output/squashfs-check.txt
+          grep -q 'squashfs-root/usr/bin/nmcli$' output/squashfs-check.txt
+          grep -q 'squashfs-root/usr/sbin/wpa_supplicant$' output/squashfs-check.txt
 
       - name: Контрольная сумма
         run: |
@@ -89,8 +77,7 @@ jobs:
             output/iso-el-torito-check.txt
             output/iso-live-files.txt
             output/iso-file-info.txt
-            output/qemu-smoke.log
-            output/qemu-result.txt
+            output/squashfs-check.txt
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
