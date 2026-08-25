@@ -1,0 +1,64 @@
+name: Publish OP Kiosk OS Release
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - .github/workflows/publish-release.yml
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    env:
+      SOURCE_RUN_ID: "32849252416"
+      ARTIFACT_NAME: OP-Kiosk-OS-1.0-amd64
+      ISO_NAME: OP-Kiosk-OS-1.0-amd64.iso
+      RELEASE_TAG: op-kiosk-os-1.0
+
+    steps:
+      - name: Получение проверенного артефакта сборки
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          mkdir -p release-files
+          gh run download "$SOURCE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$ARTIFACT_NAME" \
+            --dir release-files
+
+      - name: Повторная проверка ISO и SHA-256
+        run: |
+          set -euxo pipefail
+          cd release-files
+          test -s "$ISO_NAME"
+          test -s "${ISO_NAME}.sha256"
+          sha256sum -c "${ISO_NAME}.sha256"
+          file "$ISO_NAME"
+          ls -lh "$ISO_NAME" "${ISO_NAME}.sha256"
+
+      - name: Создание или обновление релиза
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "OP Kiosk OS 1.0 для HP t530" \
+              --notes "Готовый загрузочный ISO OP Kiosk OS 1.0. Автозапуск Chromium, Ethernet и Wi-Fi, сервисное меню Ctrl+Alt+F12. Пароль администратора по умолчанию: opkiosk. Образ собран и проверен GitHub Actions."
+          fi
+
+          gh release upload "$RELEASE_TAG" \
+            "release-files/$ISO_NAME#OP Kiosk OS 1.0 — загрузочный ISO" \
+            "release-files/${ISO_NAME}.sha256#SHA-256 контрольная сумма" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
