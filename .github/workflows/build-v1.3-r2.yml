@@ -1,4 +1,5 @@
 name: Build, boot-test and publish OP Kiosk OS 1.3 R2
+# Этот запуск создаётся merge-коммитом, чтобы GitHub Actions обработал push в master.
 
 on:
   push:
