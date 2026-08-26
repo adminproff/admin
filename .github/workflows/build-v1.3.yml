@@ -1,0 +1,210 @@
+name: Build, boot-test and publish OP Kiosk OS 1.3
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - build.sh
+      - patch-v1.1.py
+      - patch-v1.3.py
+      - .github/workflows/build-v1.3.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  ISO_NAME: OP-Kiosk-OS-1.3-amd64.iso
+  RELEASE_TAG: op-kiosk-os-1.3
+
+jobs:
+  build-boot-test-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+
+    steps:
+      - name: Получение исходников
+        uses: actions/checkout@v4
+
+      - name: Подготовка исходника версии 1.3
+        run: |
+          set -Eeuxo pipefail
+          python3 patch-v1.1.py
+          python3 patch-v1.3.py
+          grep -F 'VERSION="1.3"' build.sh
+          grep -F 'lightdm' build.sh
+          grep -F 'https://op.arkhbum.local' build.sh
+          grep -F 'autologin-session=op-kiosk' build.sh
+          grep -F 'OPKIOSK_BROWSER_OK' build.sh
+          bash -n build.sh
+
+      - name: Сборка ISO в Debian 13
+        run: |
+          set -Eeuxo pipefail
+          docker run --rm --privileged \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            debian:trixie \
+            bash -lc "sed -i '/--boot-timeout 1/d' build.sh; chmod +x build.sh; ./build.sh"
+
+      - name: Проверка ISO и контрольной суммы
+        run: |
+          set -Eeuxo pipefail
+          sudo chown -R "$USER:$USER" output
+          test -s "output/$ISO_NAME"
+          cd output
+          sha256sum "$ISO_NAME" > "${ISO_NAME}.sha256"
+          sha256sum -c "${ISO_NAME}.sha256"
+          file "$ISO_NAME"
+          ls -lh "$ISO_NAME" "${ISO_NAME}.sha256"
+          cd ..
+          sudo rm -rf .build
+          docker system prune -af || true
+          df -h /
+
+      - name: Извлечение финальной live-системы
+        run: |
+          set -Eeuxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xorriso squashfs-tools qemu-system-x86 qemu-utils
+          mkdir -p runtime-test/live
+          xorriso -osirrox on \
+            -indev "output/$ISO_NAME" \
+            -extract /live runtime-test/live
+          sudo unsquashfs -d runtime-test/rootfs \
+            runtime-test/live/filesystem.squashfs
+          sudo chown -R "$USER:$USER" runtime-test
+
+      - name: Статическая проверка финального SquashFS
+        run: |
+          set -Eeuxo pipefail
+          ROOT=runtime-test/rootfs
+          test -x "$ROOT/opt/op-kiosk/session.sh"
+          test -x "$ROOT/opt/op-kiosk/start-browser.sh"
+          test -x "$ROOT/opt/op-kiosk/smoke-test.sh"
+          test -x "$ROOT/opt/op-kiosk/admin-terminal.sh"
+          test -f "$ROOT/etc/lightdm/lightdm.conf.d/50-op-kiosk.conf"
+          test -f "$ROOT/usr/share/xsessions/op-kiosk.desktop"
+          test -L "$ROOT/etc/systemd/system/display-manager.service"
+          grep -F 'autologin-user=kiosk' "$ROOT/etc/lightdm/lightdm.conf.d/50-op-kiosk.conf"
+          grep -F 'autologin-session=op-kiosk' "$ROOT/etc/lightdm/lightdm.conf.d/50-op-kiosk.conf"
+          grep -F 'https://op.arkhbum.local' "$ROOT/var/lib/op-kiosk/kiosk.conf"
+          grep -F 'exec /opt/op-kiosk/start-browser.sh' "$ROOT/opt/op-kiosk/xinitrc"
+          grep -F 'LOG=/tmp/op-kiosk-browser.log' "$ROOT/opt/op-kiosk/start-browser.sh"
+          test "$(stat -c '%U' "$ROOT/var/log/op-kiosk")" = kiosk
+          test "$(stat -c '%U' "$ROOT/var/lib/op-kiosk")" = kiosk
+          readlink "$ROOT/etc/systemd/system/default.target"
+          readlink "$ROOT/etc/systemd/system/display-manager.service"
+
+      - name: Полная загрузка ISO и проверка автоматического Chromium
+        run: |
+          set -Eeuxo pipefail
+
+          KERNEL="$(find runtime-test/live -maxdepth 1 -type f -name 'vmlinuz*' | sort | head -1)"
+          INITRD="$(find runtime-test/live -maxdepth 1 -type f -name 'initrd*' | sort | head -1)"
+          test -s "$KERNEL"
+          test -s "$INITRD"
+
+          SERIAL="$GITHUB_WORKSPACE/runtime-test/qemu-serial.log"
+          QEMU_LOG="$GITHUB_WORKSPACE/runtime-test/qemu.log"
+          : >"$SERIAL"
+          : >"$QEMU_LOG"
+
+          qemu-system-x86_64 \
+            -name op-kiosk-1.3-test \
+            -machine q35,accel=tcg \
+            -cpu max \
+            -smp 2 \
+            -m 3072 \
+            -kernel "$KERNEL" \
+            -initrd "$INITRD" \
+            -append "boot=live components live-media=/dev/sr0 username=kiosk hostname=op-kiosk locales=ru_RU.UTF-8 keyboard-layouts=us opkiosk.smoketest console=ttyS0,115200n8 console=tty0 loglevel=4 systemd.show_status=true" \
+            -drive "file=output/$ISO_NAME,media=cdrom,readonly=on,format=raw" \
+            -device e1000,netdev=net0 \
+            -netdev user,id=net0 \
+            -vga std \
+            -display none \
+            -serial "file:$SERIAL" \
+            -monitor none \
+            -no-reboot \
+            >"$QEMU_LOG" 2>&1 &
+          QEMU_PID=$!
+
+          cleanup() {
+            kill "$QEMU_PID" 2>/dev/null || true
+            wait "$QEMU_PID" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          ok=0
+          for _ in $(seq 1 420); do
+            if grep -q 'OPKIOSK_BROWSER_OK' "$SERIAL"; then
+              ok=1
+              break
+            fi
+            if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+
+          cat "$QEMU_LOG" || true
+          tail -n 600 "$SERIAL" || true
+
+          if [[ $ok -ne 1 ]]; then
+            echo 'Полная загрузка не подтвердила автоматический запуск Chromium.' >&2
+            exit 1
+          fi
+
+          printf 'OPKIOSK_FULL_BOOT_TEST=PASS\n' > runtime-test/full-boot-test.txt
+          printf 'OPKIOSK_LIGHTDM_AUTOLOGIN=PASS\n' >> runtime-test/full-boot-test.txt
+          printf 'OPKIOSK_CHROMIUM_AUTOSTART=PASS\n' >> runtime-test/full-boot-test.txt
+          cat runtime-test/full-boot-test.txt
+
+      - name: Публикация отчёта полной загрузки
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-1.3-full-boot-test
+          path: |
+            runtime-test/full-boot-test.txt
+            runtime-test/qemu-serial.log
+            runtime-test/qemu.log
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Публикация ISO как артефакта
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-1.3-amd64
+          path: |
+            output/OP-Kiosk-OS-1.3-amd64.iso
+            output/OP-Kiosk-OS-1.3-amd64.iso.sha256
+            output/iso-boot-report.txt
+            output/iso-live-files.txt
+            output/iso-file-info.txt
+            output/build.log
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Создание релиза после полной загрузочной проверки
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuxo pipefail
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "OP Kiosk OS 1.3 для HP t530 — исправленный автозапуск" \
+              --notes "Автозапуск полностью перенесён с нестабильной связки getty/.bash_profile/startx на LightDM с автоматическим входом в отдельную OP Kiosk-сессию. В образ заранее записан URL https://op.arkhbum.local. Перед публикацией финальный ISO полностью загружается в QEMU: live-boot создаёт систему, LightDM автоматически входит пользователем kiosk, Openbox запускается, Chromium стартует без ручных действий и реально загружает встроенную страницу. Физическое испытание на конкретном HP t530 выполняется после записи пользователем."
+          fi
+
+          gh release upload "$RELEASE_TAG" \
+            "output/$ISO_NAME#OP Kiosk OS 1.3 — загрузочный ISO" \
+            "output/${ISO_NAME}.sha256#SHA-256 контрольная сумма" \
+            "runtime-test/full-boot-test.txt#Отчёт автоматической полной загрузки" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
