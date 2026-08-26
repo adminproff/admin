@@ -74,7 +74,6 @@ jobs:
             -extract /live runtime-test/live
           sudo unsquashfs -d runtime-test/rootfs \
             runtime-test/live/filesystem.squashfs
-          sudo chown -R "$USER:$USER" runtime-test
 
       - name: Статическая проверка финального SquashFS
         run: |
@@ -92,8 +91,10 @@ jobs:
           grep -F 'https://op.arkhbum.local' "$ROOT/var/lib/op-kiosk/kiosk.conf"
           grep -F 'exec /opt/op-kiosk/start-browser.sh' "$ROOT/opt/op-kiosk/xinitrc"
           grep -F 'LOG=/tmp/op-kiosk-browser.log' "$ROOT/opt/op-kiosk/start-browser.sh"
-          test "$(stat -c '%U' "$ROOT/var/log/op-kiosk")" = kiosk
-          test "$(stat -c '%U' "$ROOT/var/lib/op-kiosk")" = kiosk
+          test "$(stat -c '%u' "$ROOT/var/log/op-kiosk")" = 1000
+          test "$(stat -c '%g' "$ROOT/var/log/op-kiosk")" = 1000
+          test "$(stat -c '%u' "$ROOT/var/lib/op-kiosk")" = 1000
+          test "$(stat -c '%g' "$ROOT/var/lib/op-kiosk")" = 1000
           readlink "$ROOT/etc/systemd/system/default.target"
           readlink "$ROOT/etc/systemd/system/display-manager.service"
 
