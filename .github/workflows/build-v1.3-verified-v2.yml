@@ -1,0 +1,216 @@
+name: OP Kiosk OS 1.3 - final verified ISO v2
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - ".github/workflows/build-v1.3-verified-v2.yml"
+      - "ci/verify-op-kiosk-1.3-v2.sh"
+      - "patch-v1.1.py"
+      - "patch-v1.3.py"
+      - "patch-v1.3-final.py"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: op-kiosk-os-1.3-final-verified-v2
+  cancel-in-progress: true
+
+env:
+  ISO_NAME: OP-Kiosk-OS-1.3-amd64.iso
+  RELEASE_TAG: op-kiosk-os-1.3
+  EXPECTED_URL: http://op-arkhbum.local:3080
+
+jobs:
+  build-test-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Получение исходников
+        uses: actions/checkout@v4
+
+      - name: Подготовка финальных исходников OP Kiosk OS 1.3
+        run: |
+          set -Eeuxo pipefail
+          python3 patch-v1.1.py
+          python3 patch-v1.3.py
+          python3 patch-v1.3-final.py
+
+          grep -F 'VERSION="1.3"' build.sh
+          grep -F "KIOSK_URL=$EXPECTED_URL" build.sh
+          grep -F "EXPECTED_URL='$EXPECTED_URL'" build.sh
+          grep -F 'autologin-user=kiosk' build.sh
+          grep -F 'autologin-session=op-kiosk' build.sh
+          grep -F 'OPKIOSK_RUNTIME_READY' build.sh
+          grep -F 'OPKIOSK_SMOKE_PASS' build.sh
+          grep -F "setxkbmap -layout 'us'" build.sh
+
+          bash -n build.sh
+          bash -n ci/verify-op-kiosk-1.3-v2.sh
+          python3 -m py_compile patch-v1.1.py patch-v1.3.py patch-v1.3-final.py
+
+      - name: Сборка ISO-hybrid в чистом Debian 13
+        run: |
+          set -Eeuxo pipefail
+          docker run --rm --privileged \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            debian:trixie \
+            bash -lc "sed -i '/--boot-timeout 1/d' build.sh; chmod +x build.sh; ./build.sh"
+
+      - name: Установка инструментов независимой проверки
+        run: |
+          set -Eeuxo pipefail
+          sudo chown -R "$USER:$USER" output
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xorriso squashfs-tools qemu-system-x86 qemu-utils ovmf \
+            socat imagemagick file
+
+          test -s "output/$ISO_NAME"
+          test "$(stat -c %s "output/$ISO_NAME")" -gt 500000000
+          (
+            cd output
+            sha256sum "$ISO_NAME" >"${ISO_NAME}.sha256"
+            sha256sum -c "${ISO_NAME}.sha256"
+          )
+
+      - name: Полная проверка BIOS, UEFI, сети, X11, Openbox и Chromium
+        env:
+          TIMEOUT_NORMAL: "900"
+          TIMEOUT_SMOKE: "900"
+        run: |
+          set -Eeuxo pipefail
+          chmod +x ci/verify-op-kiosk-1.3-v2.sh
+          ci/verify-op-kiosk-1.3-v2.sh "output/$ISO_NAME" runtime-test-v2
+
+      - name: Диагностика сборки и проверок
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-1.3-final-verification-diagnostics
+          path: |
+            runtime-test-v2/*.log
+            runtime-test-v2/*.txt
+            runtime-test-v2/*.png
+            runtime-test-v2/*.sha256
+            runtime-test-v2/iso-el-torito-report.txt
+            runtime-test-v2/iso-toc.txt
+            output/build.log
+            output/iso-boot-report.txt
+            output/iso-live-files.txt
+            output/iso-file-info.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Проверенный ISO как артефакт GitHub Actions
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-1.3-amd64-final-verified
+          path: |
+            output/OP-Kiosk-OS-1.3-amd64.iso
+            output/OP-Kiosk-OS-1.3-amd64.iso.sha256
+            runtime-test-v2/verification-report.txt
+            runtime-test-v2/normal-bios-screen.png
+            runtime-test-v2/normal-uefi-screen.png
+            runtime-test-v2/smoke-local-page-screen.png
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Подготовка описания релиза
+        run: |
+          set -Eeuxo pipefail
+          cat >runtime-test-v2/release-notes.md <<EOF
+          # OP Kiosk OS 1.3 для HP t530
+
+          Рабочий URL по умолчанию: \`$EXPECTED_URL\`.
+
+          Перед публикацией именно этот ISO автоматически прошёл:
+
+          - проверку ISO9660, El Torito, BIOS и UEFI BOOTX64.EFI;
+          - полную загрузку самого ISO в QEMU BIOS;
+          - полную загрузку самого ISO в QEMU UEFI;
+          - запуск NetworkManager и получение маршрута по DHCP;
+          - автологин пользователя kiosk через LightDM;
+          - запуск X11 и Openbox;
+          - запуск Chromium с точным рабочим URL;
+          - отдельную проверку фактической отрисовки встроенной страницы Chromium через DevTools;
+          - проверку трёх реальных скриншотов экрана;
+          - повторную проверку SHA-256 после скачивания опубликованного релиза.
+
+          Внутренний узел \`$EXPECTED_URL\` недоступен из GitHub Actions. Поэтому CI подтверждает точную передачу URL в Chromium, а реальную отрисовку браузера проверяет на встроенной локальной странице. Физический HP t530 окончательно проверяется после записи образа на USB — такую проверку удалённо подменять нельзя.
+
+          Полный машинный отчёт: \`verification-report.txt\`.
+          EOF
+          sed -i 's/^          //' runtime-test-v2/release-notes.md
+          cat runtime-test-v2/release-notes.md
+
+      - name: Публикация релиза только после всех PASS
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuxo pipefail
+          grep -F 'Chromium с рабочим URL при обычной BIOS-загрузке ISO: PASS' \
+            runtime-test-v2/verification-report.txt
+          grep -F 'Chromium с рабочим URL при обычной UEFI-загрузке ISO: PASS' \
+            runtime-test-v2/verification-report.txt
+          grep -F 'Фактическая отрисовка встроенной страницы Chromium через DevTools: PASS' \
+            runtime-test-v2/verification-report.txt
+
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "OP Kiosk OS 1.3 для HP t530 — финальный проверенный ISO" \
+              --notes-file runtime-test-v2/release-notes.md \
+              --latest
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "OP Kiosk OS 1.3 для HP t530 — финальный проверенный ISO" \
+              --notes-file runtime-test-v2/release-notes.md \
+              --latest
+          fi
+
+          gh release upload "$RELEASE_TAG" \
+            "output/$ISO_NAME" \
+            "output/${ISO_NAME}.sha256" \
+            runtime-test-v2/verification-report.txt \
+            runtime-test-v2/normal-bios-screen.png \
+            runtime-test-v2/normal-uefi-screen.png \
+            runtime-test-v2/smoke-local-page-screen.png \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+      - name: Контрольное скачивание опубликованного ISO и SHA-256
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuxo pipefail
+          rm -rf release-check
+          mkdir release-check
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir release-check
+
+          test -s "release-check/$ISO_NAME"
+          test -s "release-check/${ISO_NAME}.sha256"
+          (
+            cd release-check
+            sha256sum -c "${ISO_NAME}.sha256"
+          )
+
+          EXPECTED_SHA="$(sha256sum "output/$ISO_NAME" | awk '{print $1}')"
+          RELEASE_SHA="$(sha256sum "release-check/$ISO_NAME" | awk '{print $1}')"
+          test "$EXPECTED_SHA" = "$RELEASE_SHA"
+
+          gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json url,tagName,isLatest,assets \
+            >runtime-test-v2/release-verification.json
+          cat runtime-test-v2/release-verification.json
