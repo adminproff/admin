@@ -1,0 +1,125 @@
+name: OP Kiosk OS 1.3 build tools
+
+on:
+  push:
+    branches:
+      - op-kiosk-build-1.3-20260827
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare-tools:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Prepare workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/debs out/qemu-portable/{bin,lib,modules,share}
+
+      - name: Download Debian 13 LightDM packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/out/debs:/out" \
+            debian:trixie-slim \
+            bash -lc '
+              set -euo pipefail
+              apt-get update
+              apt-get install -y --no-install-recommends apt-utils ca-certificates
+              cd /out
+              apt-get download lightdm libgcrypt20
+              sha256sum *.deb > SHA256SUMS
+              dpkg-deb --info lightdm_*_amd64.deb > lightdm-package-info.txt
+            '
+          sudo chown -R "$USER:$USER" out/debs
+          test -s out/debs/lightdm_1.32.0-6+b2_amd64.deb
+          echo 'a812e9897f78de52569a2d1a1ba46599af0f1483fa0a77b2ac8b7f2b4a3890a9  out/debs/lightdm_1.32.0-6+b2_amd64.deb' | sha256sum -c -
+
+      - name: Install and package portable QEMU
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf zstd
+
+          ROOT="$PWD/out/qemu-portable"
+          cp -L "$(command -v qemu-system-x86_64)" "$ROOT/bin/qemu-system-x86_64.real"
+          cp -L "$(command -v qemu-img)" "$ROOT/bin/qemu-img.real"
+
+          mapfile -t modules < <(find /usr/lib -type f -path '*/qemu/*.so' -print 2>/dev/null | sort -u)
+          for module in "${modules[@]}"; do
+            cp -L "$module" "$ROOT/modules/"
+          done
+
+          {
+            printf '%s\n' "$(command -v qemu-system-x86_64)" "$(command -v qemu-img)"
+            printf '%s\n' "${modules[@]}"
+          } | while IFS= read -r file; do
+            [ -n "$file" ] || continue
+            ldd "$file" 2>/dev/null | awk '
+              /=> \/.*\(/ { print $3 }
+              /^\// { print $1 }
+            '
+          done | sort -u > "$PWD/out/qemu-libraries.txt"
+
+          while IFS= read -r library; do
+            [ -f "$library" ] || continue
+            cp -L "$library" "$ROOT/lib/"
+          done < "$PWD/out/qemu-libraries.txt"
+
+          loader="$(ldd "$(command -v qemu-system-x86_64)" | awk '/ld-linux/ {print $1; exit}')"
+          test -f "$loader"
+          cp -L "$loader" "$ROOT/lib/ld-linux-x86-64.so.2"
+
+          for data_dir in /usr/share/qemu /usr/share/seabios /usr/share/OVMF; do
+            if [ -d "$data_dir" ]; then
+              mkdir -p "$ROOT/share/$(basename "$data_dir")"
+              cp -aL "$data_dir"/. "$ROOT/share/$(basename "$data_dir")/"
+            fi
+          done
+
+          cat > "$ROOT/qemu-system-x86_64" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          HERE="$(cd "$(dirname "$0")" && pwd)"
+          export LD_LIBRARY_PATH="$HERE/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export QEMU_MODULE_DIR="$HERE/modules"
+          exec "$HERE/lib/ld-linux-x86-64.so.2" \
+            --library-path "$HERE/lib" \
+            "$HERE/bin/qemu-system-x86_64.real" \
+            -L "$HERE/share/qemu" "$@"
+          EOF
+
+          cat > "$ROOT/qemu-img" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          HERE="$(cd "$(dirname "$0")" && pwd)"
+          export LD_LIBRARY_PATH="$HERE/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          exec "$HERE/lib/ld-linux-x86-64.so.2" \
+            --library-path "$HERE/lib" \
+            "$HERE/bin/qemu-img.real" "$@"
+          EOF
+
+          chmod 0755 "$ROOT/qemu-system-x86_64" "$ROOT/qemu-img"
+          "$ROOT/qemu-system-x86_64" --version
+          "$ROOT/qemu-img" --version
+
+          tar -C out -I 'zstd -19 -T0' -cf out/qemu-portable.tar.zst qemu-portable
+          sha256sum out/qemu-portable.tar.zst > out/qemu-portable.tar.zst.sha256
+
+      - name: Upload build inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-kiosk-build-inputs
+          path: |
+            out/debs
+            out/qemu-portable.tar.zst
+            out/qemu-portable.tar.zst.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
