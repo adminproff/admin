@@ -42,9 +42,10 @@ jobs:
           grep -F "EXPECTED_URL='$EXPECTED_URL'" build.sh
           grep -F 'autologin-user=kiosk' build.sh
           grep -F 'autologin-session=op-kiosk' build.sh
-          grep -F '/var/log/op-kiosk/session.log' build.sh
-          grep -F '/var/log/op-kiosk/openbox.log' build.sh
-          grep -F '/var/log/op-kiosk/browser.log' build.sh
+          grep -F 'LOG_DIR=/var/log/op-kiosk' build.sh
+          grep -F 'SESSION_LOG="$LOG_DIR/session.log"' build.sh
+          grep -F '"$LOG_DIR/openbox.log"' build.sh
+          grep -F 'LOG="$LOG_DIR/browser.log"' build.sh
           grep -F '/var/log/lightdm/lightdm.log' build.sh
           grep -F 'OPKIOSK_RUNTIME_READY' build.sh
           grep -F 'OPKIOSK_SMOKE_PASS' build.sh
