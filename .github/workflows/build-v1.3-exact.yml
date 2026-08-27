@@ -1,0 +1,162 @@
+name: OP Kiosk OS 1.3 - exact HTTPS verified ISO
+
+on:
+  push:
+    branches:
+      - op-kiosk-v1.3-exact-20260827
+    paths:
+      - ".github/workflows/build-v1.3-exact.yml"
+      - "patch-v1.3-exact-url.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: op-kiosk-os-1.3-exact-https
+  cancel-in-progress: true
+
+env:
+  ISO_NAME: OP-Kiosk-OS-1.3-amd64.iso
+  EXPECTED_URL: https://op.arkhbum.local
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Получение исходников
+        uses: actions/checkout@v4
+
+      - name: Подготовка OP Kiosk OS 1.3
+        run: |
+          set -Eeuxo pipefail
+          python3 patch-v1.1.py
+          python3 patch-v1.3.py
+          python3 patch-v1.3-final.py
+          python3 patch-v1.3-exact-url.py
+
+          grep -F 'VERSION="1.3"' build.sh
+          grep -F "KIOSK_URL=$EXPECTED_URL" build.sh
+          grep -F "EXPECTED_URL='$EXPECTED_URL'" build.sh
+          grep -F 'autologin-user=kiosk' build.sh
+          grep -F 'autologin-session=op-kiosk' build.sh
+          grep -F '/var/log/op-kiosk/session.log' build.sh
+          grep -F '/var/log/op-kiosk/openbox.log' build.sh
+          grep -F '/var/log/op-kiosk/browser.log' build.sh
+          grep -F '/var/log/lightdm/lightdm.log' build.sh
+          grep -F 'OPKIOSK_RUNTIME_READY' build.sh
+          grep -F 'OPKIOSK_SMOKE_PASS' build.sh
+          if grep -Fq 'http://op-arkhbum.local:3080' build.sh; then
+            echo 'ОШИБКА: в сборке остался временный HTTP URL' >&2
+            exit 1
+          fi
+
+          bash -n build.sh
+          bash -n ci/verify-op-kiosk-1.3-v2.sh
+          python3 -m py_compile \
+            patch-v1.1.py patch-v1.3.py patch-v1.3-final.py \
+            patch-v1.3-exact-url.py
+
+      - name: Сборка ISO-hybrid в Debian 13
+        run: |
+          set -Eeuxo pipefail
+          docker run --rm --privileged \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            debian:trixie \
+            bash -lc "sed -i '/--boot-timeout 1/d' build.sh; chmod +x build.sh; ./build.sh"
+
+      - name: Установка инструментов проверки
+        run: |
+          set -Eeuxo pipefail
+          sudo chown -R "$USER:$USER" output
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xorriso squashfs-tools qemu-system-x86 qemu-utils ovmf \
+            socat imagemagick file
+
+          test -s "output/$ISO_NAME"
+          test "$(stat -c %s "output/$ISO_NAME")" -gt 500000000
+          (
+            cd output
+            sha256sum "$ISO_NAME" >"${ISO_NAME}.sha256"
+            sha256sum -c "${ISO_NAME}.sha256"
+          )
+
+      - name: Полная автоматическая проверка BIOS и UEFI
+        env:
+          TIMEOUT_NORMAL: "900"
+          TIMEOUT_SMOKE: "900"
+        run: |
+          set -Eeuxo pipefail
+          chmod +x ci/verify-op-kiosk-1.3-v2.sh
+          mkdir -p runtime-test-final
+
+          set +e
+          sudo --preserve-env=EXPECTED_URL,TIMEOUT_NORMAL,TIMEOUT_SMOKE \
+            ci/verify-op-kiosk-1.3-v2.sh \
+            "output/$ISO_NAME" runtime-test-final \
+            2>&1 | tee runtime-test-final/verifier.log
+          RC=${PIPESTATUS[0]}
+          set -e
+
+          sudo chown -R "$USER:$USER" runtime-test-final 2>/dev/null || true
+          exit "$RC"
+
+      - name: Диагностика независимо от результата
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-1.3-exact-diagnostics
+          path: |
+            runtime-test-final/verifier.log
+            runtime-test-final/*.log
+            runtime-test-final/*.txt
+            runtime-test-final/*.png
+            runtime-test-final/*.sha256
+            output/build.log
+            output/iso-boot-report.txt
+            output/iso-live-files.txt
+            output/iso-file-info.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Подготовка комплекта выдачи
+        run: |
+          set -Eeuxo pipefail
+          mkdir -p delivery
+          cp "output/$ISO_NAME" delivery/
+          cp "output/${ISO_NAME}.sha256" delivery/
+          cp runtime-test-final/verification-report.txt delivery/
+          cp runtime-test-final/normal-bios-screen.png delivery/
+          cp runtime-test-final/normal-uefi-screen.png delivery/
+          cp runtime-test-final/smoke-local-page-screen.png delivery/
+
+          split -b 200M -d -a 2 \
+            "output/$ISO_NAME" \
+            "delivery/${ISO_NAME}.part-"
+          for f in delivery/${ISO_NAME}.part-*; do mv "$f" "$f.bin"; done
+          sha256sum delivery/${ISO_NAME}.part-*.bin \
+            >delivery/${ISO_NAME}.parts.sha256
+
+          cat >delivery/СОБРАТЬ-ОБРАЗ.cmd <<'CMD'
+          @echo off
+          setlocal
+          cd /d "%~dp0"
+          copy /b OP-Kiosk-OS-1.3-amd64.iso.part-00.bin+OP-Kiosk-OS-1.3-amd64.iso.part-01.bin+OP-Kiosk-OS-1.3-amd64.iso.part-02.bin+OP-Kiosk-OS-1.3-amd64.iso.part-03.bin+OP-Kiosk-OS-1.3-amd64.iso.part-04.bin+OP-Kiosk-OS-1.3-amd64.iso.part-05.bin OP-Kiosk-OS-1.3-amd64.iso
+          if errorlevel 1 exit /b 1
+          powershell.exe -NoProfile -Command "Get-FileHash -Algorithm SHA256 '.\OP-Kiosk-OS-1.3-amd64.iso'"
+          pause
+          CMD
+          sed -i 's/^          //' delivery/СОБРАТЬ-ОБРАЗ.cmd
+
+      - name: Загрузка проверенного образа
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-1.3-amd64-EXACT-PASS
+          path: delivery/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
