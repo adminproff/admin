@@ -16,7 +16,8 @@ log() {
     printf '\n[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
 }
 
-for command_name in split sha256sum stat awk find sort wc cat cmp basename dirname; do
+for command_name in \
+    split sha256sum stat awk find sort cat basename dirname readlink cp mkdir; do
     command -v "$command_name" >/dev/null 2>&1 \
         || fail "Не найден обязательный инструмент: $command_name"
 done
@@ -94,12 +95,20 @@ log "Создание SHA-256 каждой части"
 
 log "Копирование сборщика и итоговой контрольной суммы"
 cp -f "$SCRIPT_DIR/download-kit/MERGE-OP-Kiosk-OS-2.0.cmd" "$OUTPUT_DIR/"
-cp -f "$SCRIPT_DIR/download-kit/MERGE-OP-Kiosk-OS-2.0.ps1" "$OUTPUT_DIR/"
 cp -f "$SCRIPT_DIR/download-kit/README-FIRST-RU.txt" "$OUTPUT_DIR/"
+{
+    # Windows PowerShell 5.1 корректно читает кириллицу только при наличии UTF-8 BOM.
+    printf '\357\273\277'
+    cat "$SCRIPT_DIR/download-kit/MERGE-OP-Kiosk-OS-2.0.ps1"
+} >"$OUTPUT_DIR/MERGE-OP-Kiosk-OS-2.0.ps1"
 printf '%s  %s\n' "$EXPECTED_ISO_HASH" "$ISO_NAME" >"$ISO_HASH_FILE"
 
 log "Потоковая проверка обратной сборки"
-REBUILT_HASH="$(cat "${PART_FILES[@]}" | sha256sum | awk '{print tolower($1)}')"
+REBUILT_HASH="$({
+    for part in "${PART_FILES[@]}"; do
+        cat "$part"
+    done
+} | sha256sum | awk '{print tolower($1)}')"
 [[ "$REBUILT_HASH" == "$EXPECTED_ISO_HASH" ]] \
     || fail "Обратная сборка частей дала неверный SHA-256: $REBUILT_HASH"
 
@@ -109,7 +118,7 @@ for part in "${PART_FILES[@]}"; do
     SUM_PARTS=$(( SUM_PARTS + size ))
 done
 ISO_SIZE="$(stat -c '%s' "$ISO_PATH")"
-[[ "$SUM_PARTS" == "$ISO_SIZE" ]] \
+(( SUM_PARTS == ISO_SIZE )) \
     || fail "Суммарный размер частей $SUM_PARTS не равен размеру ISO $ISO_SIZE"
 
 cat >"$INFO_FILE" <<EOF
