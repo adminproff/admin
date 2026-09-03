@@ -1,4 +1,4 @@
-name: OP Kiosk OS 2.0 — build and full install test
+name: OP Kiosk OS 2.0 — build, install test and split release
 
 on:
   push:
@@ -19,6 +19,8 @@ concurrency:
 env:
   OPKIOSK_VERSION: 2.0.0-alpha1
   OPKIOSK_URL: http://op-arkhbum.local:3080
+  OPKIOSK_PART_SIZE_MIB: 200
+  OPKIOSK_MAX_PARTS: 12
 
 jobs:
   build-and-test:
@@ -63,19 +65,24 @@ jobs:
             v2/prepare-config.sh \
             v2/fix-generated-config.sh \
             v2/post-config-hardening.sh \
+            v2/create-release-parts.sh \
             v2/ci/strengthen-test.sh \
             v2/ci/test-full-cycle.sh
+
           bash -n v2/build.sh
           bash -n v2/prepare-config.sh
           bash -n v2/fix-generated-config.sh
           bash -n v2/post-config-hardening.sh
+          bash -n v2/create-release-parts.sh
           bash -n v2/ci/strengthen-test.sh
           bash -n v2/ci/test-full-cycle.sh
+
           shellcheck -x -S warning \
             v2/build.sh \
             v2/prepare-config.sh \
             v2/fix-generated-config.sh \
             v2/post-config-hardening.sh \
+            v2/create-release-parts.sh \
             v2/ci/strengthen-test.sh \
             v2/ci/test-full-cycle.sh
 
@@ -132,6 +139,28 @@ jobs:
           grep -F 'OP Kiosk OS full-cycle CI: PASS' \
             v2/test-results/full-cycle-report.txt
 
+      - name: Подготовка малых частей проверенного ISO
+        shell: bash
+        run: |
+          set -Eeuxo pipefail
+          ISO="v2/output/OP-Kiosk-OS-${OPKIOSK_VERSION}-amd64.iso"
+
+          v2/create-release-parts.sh "$ISO" v2/release-parts
+
+          cp -f v2/output/BUILD-INFO.txt v2/release-parts/
+          cp -f v2/test-results/full-cycle-report.txt v2/release-parts/
+          cp -f v2/test-results/*-ready.png v2/release-parts/ 2>/dev/null || true
+          cp -f v2/test-results/*-menu.png v2/release-parts/ 2>/dev/null || true
+
+          test -s v2/release-parts/PART-COUNT.txt
+          PART_COUNT="$(cat v2/release-parts/PART-COUNT.txt)"
+          test "$PART_COUNT" -ge 1
+          test "$PART_COUNT" -le "$OPKIOSK_MAX_PARTS"
+
+          echo "Создано частей: $PART_COUNT"
+          ls -lh v2/release-parts
+          df -h
+
       - name: Сводка результата
         if: always()
         shell: bash
@@ -151,6 +180,12 @@ jobs:
               cat v2/test-results/full-cycle-report.txt
               echo '```'
             fi
+            if [ -f v2/release-parts/DOWNLOAD-INFO.txt ]; then
+              echo '## Split release'
+              echo '```text'
+              cat v2/release-parts/DOWNLOAD-INFO.txt
+              echo '```'
+            fi
           } >>"$GITHUB_STEP_SUMMARY"
 
       - name: Диагностика независимо от результата
@@ -167,30 +202,143 @@ jobs:
           retention-days: 30
           compression-level: 6
 
-      - name: Экспериментальный ISO для разбора сбоя
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: OP-Kiosk-OS-2.0.0-alpha1-FAILED-CI-DO-NOT-INSTALL
-          path: |
-            v2/output/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso
-            v2/output/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.sha256
-          if-no-files-found: ignore
-          retention-days: 1
-          compression-level: 0
-
-      - name: Проверенный ISO
+      - name: Малый комплект сборки и проверки
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: OP-Kiosk-OS-2.0.0-alpha1-FULL-CYCLE-PASS
+          name: OP-Kiosk-OS-2.0.0-alpha1-DOWNLOAD-KIT
           path: |
-            v2/output/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso
-            v2/output/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.sha256
-            v2/output/BUILD-INFO.txt
-            v2/test-results/full-cycle-report.txt
-            v2/test-results/*-ready.png
-            v2/test-results/*-menu.png
+            v2/release-parts/MERGE-OP-Kiosk-OS-2.0.cmd
+            v2/release-parts/MERGE-OP-Kiosk-OS-2.0.ps1
+            v2/release-parts/README-FIRST-RU.txt
+            v2/release-parts/DOWNLOAD-INFO.txt
+            v2/release-parts/PART-COUNT.txt
+            v2/release-parts/OP-Kiosk-OS-2.0.0-alpha1-parts.sha256
+            v2/release-parts/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.sha256
+            v2/release-parts/BUILD-INFO.txt
+            v2/release-parts/full-cycle-report.txt
+            v2/release-parts/*-ready.png
+            v2/release-parts/*-menu.png
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 6
+
+      - name: Проверенный ISO — часть 01
+        if: success() && hashFiles('v2/release-parts/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.part-01.bin') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-2.0.0-alpha1-PART-01
+          path: v2/release-parts/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.part-01.bin
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Проверенный ISO — часть 02
+        if: success() && hashFiles('v2/release-parts/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.part-02.bin') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-2.0.0-alpha1-PART-02
+          path: v2/release-parts/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.part-02.bin
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Проверенный ISO — часть 03
+        if: success() && hashFiles('v2/release-parts/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.part-03.bin') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-2.0.0-alpha1-PART-03
+          path: v2/release-parts/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.part-03.bin
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Проверенный ISO — часть 04
+        if: success() && hashFiles('v2/release-parts/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.part-04.bin') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-2.0.0-alpha1-PART-04
+          path: v2/release-parts/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.part-04.bin
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Проверенный ISO — часть 05
+        if: success() && hashFiles('v2/release-parts/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.part-05.bin') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-2.0.0-alpha1-PART-05
+          path: v2/release-parts/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.part-05.bin
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Проверенный ISO — часть 06
+        if: success() && hashFiles('v2/release-parts/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.part-06.bin') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-2.0.0-alpha1-PART-06
+          path: v2/release-parts/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.part-06.bin
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Проверенный ISO — часть 07
+        if: success() && hashFiles('v2/release-parts/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.part-07.bin') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-2.0.0-alpha1-PART-07
+          path: v2/release-parts/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.part-07.bin
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Проверенный ISO — часть 08
+        if: success() && hashFiles('v2/release-parts/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.part-08.bin') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-2.0.0-alpha1-PART-08
+          path: v2/release-parts/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.part-08.bin
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Проверенный ISO — часть 09
+        if: success() && hashFiles('v2/release-parts/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.part-09.bin') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-2.0.0-alpha1-PART-09
+          path: v2/release-parts/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.part-09.bin
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Проверенный ISO — часть 10
+        if: success() && hashFiles('v2/release-parts/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.part-10.bin') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-2.0.0-alpha1-PART-10
+          path: v2/release-parts/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.part-10.bin
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Проверенный ISO — часть 11
+        if: success() && hashFiles('v2/release-parts/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.part-11.bin') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-2.0.0-alpha1-PART-11
+          path: v2/release-parts/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.part-11.bin
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Проверенный ISO — часть 12
+        if: success() && hashFiles('v2/release-parts/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.part-12.bin') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-2.0.0-alpha1-PART-12
+          path: v2/release-parts/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.part-12.bin
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
