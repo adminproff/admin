@@ -133,7 +133,9 @@ cp -f "$ISO_SOURCE" "$ISO_PATH"
 log "Структурная проверка ISO"
 xorriso -indev "$ISO_PATH" -report_el_torito plain \
     >"$LOG_DIR/iso-el-torito.txt" 2>&1
-xorriso -indev "$ISO_PATH" -find / -maxdepth 3 -type f -print \
+# В xorriso действие -find по умолчанию — echo. GNU-опция "-print" здесь
+# недопустима и в предыдущем варианте ошибочно останавливала уже готовую сборку.
+xorriso -indev "$ISO_PATH" -find / -maxdepth 3 -type f \
     >"$LOG_DIR/iso-files.txt" 2>&1
 file "$ISO_PATH" >"$LOG_DIR/iso-file-info.txt"
 
