@@ -72,7 +72,6 @@ lb config noauto \
     --uefi-secure-boot auto \
     --memtest none \
     --checksums sha256 \
-    --boot-timeout 5 \
     --iso-application "OP Kiosk OS $VERSION" \
     --iso-publisher "OP Kiosk OS Project" \
     --iso-preparer "OP Kiosk OS automated build" \
