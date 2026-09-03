@@ -34,10 +34,10 @@ if [[ "${OPKIOSK_SKIP_APT:-0}" != 1 ]]; then
         live-build debootstrap xorriso squashfs-tools dosfstools rsync \
         ca-certificates curl gnupg file isolinux syslinux-common \
         grub-pc-bin grub-efi-amd64-bin grub-efi-amd64-signed shim-signed \
-        mtools fdisk parted jq
+        mtools fdisk parted jq python3-minimal
 fi
 
-for command_name in lb xorriso sha256sum rsync file; do
+for command_name in lb xorriso sha256sum rsync file python3; do
     command -v "$command_name" >/dev/null 2>&1 \
         || fail "Не найден обязательный инструмент: $command_name"
 done
@@ -82,6 +82,8 @@ lb config noauto \
     --work-dir "$WORK_DIR" \
     --version "$VERSION" \
     --default-url "$DEFAULT_URL"
+
+bash "$ROOT_DIR/fix-generated-config.sh" --work-dir "$WORK_DIR"
 
 log "Проверка созданной конфигурации"
 while IFS= read -r -d '' script; do
