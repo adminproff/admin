@@ -37,16 +37,13 @@ jobs:
           sudo docker system prune --all --force --volumes || true
           df -h
 
-      - name: Установка инструментов сборки и тестирования
+      - name: Установка инструментов тестирования на runner
         shell: bash
         run: |
           set -Eeuxo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            live-build debootstrap xorriso squashfs-tools dosfstools rsync \
-            ca-certificates curl gnupg file isolinux syslinux-common \
-            grub-pc-bin grub-efi-amd64-bin grub-efi-amd64-signed shim-signed \
-            mtools fdisk parted jq \
+            xorriso squashfs-tools ca-certificates curl file jq \
             qemu-system-x86 qemu-utils ovmf socat imagemagick shellcheck
 
           if [ -e /dev/kvm ]; then
@@ -54,7 +51,6 @@ jobs:
           fi
 
           qemu-system-x86_64 --version
-          lb --version
           xorriso -version
           df -h
 
@@ -71,15 +67,32 @@ jobs:
             v2/prepare-config.sh \
             v2/ci/test-full-cycle.sh
 
-      - name: Сборка OP Kiosk OS 2.0 alpha
+      - name: Сборка OP Kiosk OS 2.0 в Debian 13
         shell: bash
         run: |
           set -Eeuxo pipefail
-          sudo env \
-            OPKIOSK_SKIP_APT=1 \
-            OPKIOSK_VERSION="$OPKIOSK_VERSION" \
-            OPKIOSK_URL="$OPKIOSK_URL" \
-            bash v2/build.sh
+
+          docker run --rm --privileged \
+            --security-opt apparmor=unconfined \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            -e OPKIOSK_VERSION \
+            -e OPKIOSK_URL \
+            debian:trixie \
+            bash -lc '
+              set -Eeuxo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                live-build debootstrap xorriso squashfs-tools dosfstools rsync \
+                ca-certificates curl gnupg file isolinux syslinux-common \
+                grub-pc-bin grub-efi-amd64-bin grub-efi-amd64-signed shim-signed \
+                mtools fdisk parted jq
+
+              lb --version
+              chmod +x v2/build.sh v2/prepare-config.sh
+              OPKIOSK_SKIP_APT=1 bash v2/build.sh
+            '
 
           sudo chown -R "$USER:$USER" v2/output v2/.work
           ls -lh v2/output
