@@ -1,0 +1,140 @@
+name: OP Kiosk OS 2.0 verified development build
+
+on:
+  push:
+    branches:
+      - op-kiosk-os-2.0-rewrite
+    paths:
+      - "v2/**"
+      - ".github/workflows/op-kiosk-os-2.0-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: op-kiosk-os-2.0-ci-v2
+  cancel-in-progress: true
+
+env:
+  ISO_NAME: OP-Kiosk-OS-2.0.0-dev-amd64.iso
+
+jobs:
+  full-cycle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Проверка синтаксиса
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash -n v2/build.sh
+          bash -n v2/ci/verify-runtime.sh
+
+      - name: Сборка ISO
+        shell: bash
+        run: |
+          set -Eeuxo pipefail
+          docker run --rm --privileged \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work/v2 \
+            debian:trixie \
+            bash -lc 'apt-get update; apt-get install -y --no-install-recommends python3; chmod +x build.sh; ./build.sh'
+          sudo chown -R "$USER:$USER" v2/output v2/.build
+          test -s "v2/output/$ISO_NAME"
+          (cd v2/output && sha256sum -c "$ISO_NAME.sha256")
+
+      - name: Установка QEMU и средств контроля
+        shell: bash
+        run: |
+          set -Eeuxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-utils ovmf xorriso squashfs-tools \
+            socat imagemagick file
+
+      - name: Live BIOS/UEFI и полная установка BIOS/UEFI
+        shell: bash
+        env:
+          TIMEOUT_LIVE: "900"
+          TIMEOUT_INSTALL: "3600"
+          TIMEOUT_INSTALLED: "900"
+        run: |
+          set -Eeuxo pipefail
+          mkdir -p runtime-test
+          chmod +x v2/ci/verify-runtime.sh
+          v2/ci/verify-runtime.sh "v2/output/$ISO_NAME" runtime-test \
+            2>&1 | tee runtime-test-console.log
+
+      - name: Подготовка снимков
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          for image in runtime-test/*.ppm; do
+            [ -f "$image" ] || continue
+            convert "$image" "${image%.ppm}.png"
+          done
+
+      - name: Загрузка диагностики
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-2.0-diagnostics-${{ github.run_number }}
+          path: |
+            runtime-test-console.log
+            runtime-test/**
+            v2/output/build.log
+            v2/output/iso-boot-report.txt
+            v2/output/iso-files.txt
+            v2/output/iso-file-info.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Загрузка ISO только после полного PASS
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-2.0.0-dev-FULL-CYCLE-PASS
+          path: |
+            v2/output/OP-Kiosk-OS-2.0.0-dev-amd64.iso
+            v2/output/OP-Kiosk-OS-2.0.0-dev-amd64.iso.sha256
+            runtime-test/verification-report.txt
+            runtime-test/*.png
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Публикация последнего статуса в ветку
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_NUMBER: ${{ github.run_number }}
+          HEAD_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set +e
+          RESULT_DIR="ci-results/op-kiosk-os-2.0/latest"
+          rm -rf "$RESULT_DIR"
+          mkdir -p "$RESULT_DIR"
+          {
+            echo "status=$JOB_STATUS"
+            echo "run_id=$RUN_ID"
+            echo "run_number=$RUN_NUMBER"
+            echo "head_sha=$HEAD_SHA"
+            echo "finished_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >"$RESULT_DIR/status.txt"
+          cp -f runtime-test-console.log "$RESULT_DIR/" 2>/dev/null || true
+          cp -f v2/output/build.log "$RESULT_DIR/" 2>/dev/null || true
+          cp -f runtime-test/verification-report.txt "$RESULT_DIR/" 2>/dev/null || true
+          for file in runtime-test/*.serial.log runtime-test/*.qemu.log runtime-test/*.txt; do
+            [ -f "$file" ] && cp -f "$file" "$RESULT_DIR/"
+          done
+          git config user.name "OP Kiosk OS CI"
+          git config user.email "actions@users.noreply.github.com"
+          git add "$RESULT_DIR"
+          git commit -m "CI: OP Kiosk OS 2.0 run $RUN_NUMBER — $JOB_STATUS" || true
+          git push origin HEAD:op-kiosk-os-2.0-rewrite || true
