@@ -84,6 +84,7 @@ lb config noauto \
     --default-url "$DEFAULT_URL"
 
 bash "$ROOT_DIR/fix-generated-config.sh" --work-dir "$WORK_DIR"
+bash "$ROOT_DIR/post-config-hardening.sh" --work-dir "$WORK_DIR"
 
 log "Проверка созданной конфигурации"
 while IFS= read -r -d '' script; do
@@ -134,7 +135,7 @@ log "Структурная проверка ISO"
 xorriso -indev "$ISO_PATH" -report_el_torito plain \
     >"$LOG_DIR/iso-el-torito.txt" 2>&1
 # В xorriso действие -find по умолчанию — echo. GNU-опция "-print" здесь
-# недопустима и в предыдущем варианте ошибочно останавливала уже готовую сборку.
+# недопустима и раньше ошибочно останавливала уже готовую сборку.
 xorriso -indev "$ISO_PATH" -find / -maxdepth 3 -type f \
     >"$LOG_DIR/iso-files.txt" 2>&1
 file "$ISO_PATH" >"$LOG_DIR/iso-file-info.txt"
