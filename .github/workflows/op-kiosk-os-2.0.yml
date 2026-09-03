@@ -62,15 +62,21 @@ jobs:
             v2/build.sh \
             v2/prepare-config.sh \
             v2/fix-generated-config.sh \
+            v2/post-config-hardening.sh \
+            v2/ci/strengthen-test.sh \
             v2/ci/test-full-cycle.sh
           bash -n v2/build.sh
           bash -n v2/prepare-config.sh
           bash -n v2/fix-generated-config.sh
+          bash -n v2/post-config-hardening.sh
+          bash -n v2/ci/strengthen-test.sh
           bash -n v2/ci/test-full-cycle.sh
           shellcheck -x -S warning \
             v2/build.sh \
             v2/prepare-config.sh \
             v2/fix-generated-config.sh \
+            v2/post-config-hardening.sh \
+            v2/ci/strengthen-test.sh \
             v2/ci/test-full-cycle.sh
 
       - name: Сборка OP Kiosk OS 2.0 в Debian 13
@@ -99,7 +105,8 @@ jobs:
               chmod +x \
                 v2/build.sh \
                 v2/prepare-config.sh \
-                v2/fix-generated-config.sh
+                v2/fix-generated-config.sh \
+                v2/post-config-hardening.sh
               OPKIOSK_SKIP_APT=1 bash v2/build.sh
             '
 
@@ -114,6 +121,9 @@ jobs:
           set -Eeuxo pipefail
           ISO="v2/output/OP-Kiosk-OS-${OPKIOSK_VERSION}-amd64.iso"
           test -s "$ISO"
+
+          bash v2/ci/strengthen-test.sh v2/ci/test-full-cycle.sh
+          bash -n v2/ci/test-full-cycle.sh
 
           mkdir -p v2/test-results
           v2/ci/test-full-cycle.sh "$ISO" v2/test-results \
@@ -150,11 +160,24 @@ jobs:
           name: OP-Kiosk-OS-2.0-alpha1-diagnostics
           path: |
             v2/output/BUILD-INFO.txt
+            v2/output/*.iso.sha256
             v2/output/logs
             v2/test-results
           if-no-files-found: warn
           retention-days: 30
           compression-level: 6
+
+      - name: Экспериментальный ISO для разбора сбоя
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-2.0.0-alpha1-FAILED-CI-DO-NOT-INSTALL
+          path: |
+            v2/output/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso
+            v2/output/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.sha256
+          if-no-files-found: ignore
+          retention-days: 1
+          compression-level: 0
 
       - name: Проверенный ISO
         if: success()
