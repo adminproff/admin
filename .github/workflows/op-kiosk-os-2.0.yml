@@ -58,13 +58,19 @@ jobs:
         shell: bash
         run: |
           set -Eeuxo pipefail
-          chmod +x v2/build.sh v2/prepare-config.sh v2/ci/test-full-cycle.sh
+          chmod +x \
+            v2/build.sh \
+            v2/prepare-config.sh \
+            v2/fix-generated-config.sh \
+            v2/ci/test-full-cycle.sh
           bash -n v2/build.sh
           bash -n v2/prepare-config.sh
+          bash -n v2/fix-generated-config.sh
           bash -n v2/ci/test-full-cycle.sh
           shellcheck -x -S warning \
             v2/build.sh \
             v2/prepare-config.sh \
+            v2/fix-generated-config.sh \
             v2/ci/test-full-cycle.sh
 
       - name: Сборка OP Kiosk OS 2.0 в Debian 13
@@ -87,10 +93,13 @@ jobs:
                 live-build debootstrap xorriso squashfs-tools dosfstools rsync \
                 ca-certificates curl gnupg file isolinux syslinux-common \
                 grub-pc-bin grub-efi-amd64-bin grub-efi-amd64-signed shim-signed \
-                mtools fdisk parted jq
+                mtools fdisk parted jq python3-minimal
 
               lb --version
-              chmod +x v2/build.sh v2/prepare-config.sh
+              chmod +x \
+                v2/build.sh \
+                v2/prepare-config.sh \
+                v2/fix-generated-config.sh
               OPKIOSK_SKIP_APT=1 bash v2/build.sh
             '
 
