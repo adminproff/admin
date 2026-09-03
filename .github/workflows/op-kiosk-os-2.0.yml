@@ -1,0 +1,151 @@
+name: OP Kiosk OS 2.0 — build and full install test
+
+on:
+  push:
+    branches:
+      - op-kiosk-os-2.0-rewrite
+    paths:
+      - "v2/**"
+      - ".github/workflows/op-kiosk-os-2.0.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: op-kiosk-os-2.0-rewrite
+  cancel-in-progress: true
+
+env:
+  OPKIOSK_VERSION: 2.0.0-alpha1
+  OPKIOSK_URL: http://op-arkhbum.local:3080
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Получение исходников
+        uses: actions/checkout@v4
+
+      - name: Освобождение места на runner
+        shell: bash
+        run: |
+          set -Eeuxo pipefail
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet || true
+          sudo docker system prune --all --force --volumes || true
+          df -h
+
+      - name: Установка инструментов сборки и тестирования
+        shell: bash
+        run: |
+          set -Eeuxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            live-build debootstrap xorriso squashfs-tools dosfstools rsync \
+            ca-certificates curl gnupg file isolinux syslinux-common \
+            grub-pc-bin grub-efi-amd64-bin grub-efi-amd64-signed shim-signed \
+            mtools fdisk parted jq \
+            qemu-system-x86 qemu-utils ovmf socat imagemagick shellcheck
+
+          if [ -e /dev/kvm ]; then
+            sudo chmod a+rw /dev/kvm || true
+          fi
+
+          qemu-system-x86_64 --version
+          lb --version
+          xorriso -version
+          df -h
+
+      - name: Статическая проверка исходников
+        shell: bash
+        run: |
+          set -Eeuxo pipefail
+          chmod +x v2/build.sh v2/prepare-config.sh v2/ci/test-full-cycle.sh
+          bash -n v2/build.sh
+          bash -n v2/prepare-config.sh
+          bash -n v2/ci/test-full-cycle.sh
+          shellcheck -x -S warning \
+            v2/build.sh \
+            v2/prepare-config.sh \
+            v2/ci/test-full-cycle.sh
+
+      - name: Сборка OP Kiosk OS 2.0 alpha
+        shell: bash
+        run: |
+          set -Eeuxo pipefail
+          sudo env \
+            OPKIOSK_SKIP_APT=1 \
+            OPKIOSK_VERSION="$OPKIOSK_VERSION" \
+            OPKIOSK_URL="$OPKIOSK_URL" \
+            bash v2/build.sh
+
+          sudo chown -R "$USER:$USER" v2/output v2/.work
+          ls -lh v2/output
+          cat v2/output/BUILD-INFO.txt
+          df -h
+
+      - name: Полный цикл установки и холодной загрузки
+        shell: bash
+        run: |
+          set -Eeuxo pipefail
+          ISO="v2/output/OP-Kiosk-OS-${OPKIOSK_VERSION}-amd64.iso"
+          test -s "$ISO"
+
+          mkdir -p v2/test-results
+          v2/ci/test-full-cycle.sh "$ISO" v2/test-results \
+            2>&1 | tee v2/test-results/workflow-console.log
+
+          grep -F 'OP Kiosk OS full-cycle CI: PASS' \
+            v2/test-results/full-cycle-report.txt
+
+      - name: Сводка результата
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '# OP Kiosk OS 2.0 CI'
+            echo
+            if [ -f v2/output/BUILD-INFO.txt ]; then
+              echo '## Build'
+              echo '```text'
+              cat v2/output/BUILD-INFO.txt
+              echo '```'
+            fi
+            if [ -f v2/test-results/full-cycle-report.txt ]; then
+              echo '## Full cycle'
+              echo '```text'
+              cat v2/test-results/full-cycle-report.txt
+              echo '```'
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Диагностика независимо от результата
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-2.0-alpha1-diagnostics
+          path: |
+            v2/output/BUILD-INFO.txt
+            v2/output/logs
+            v2/test-results
+          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 6
+
+      - name: Проверенный ISO
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-2.0.0-alpha1-FULL-CYCLE-PASS
+          path: |
+            v2/output/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso
+            v2/output/OP-Kiosk-OS-2.0.0-alpha1-amd64.iso.sha256
+            v2/output/BUILD-INFO.txt
+            v2/test-results/full-cycle-report.txt
+            v2/test-results/*-ready.png
+            v2/test-results/*-menu.png
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
