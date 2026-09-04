@@ -1,0 +1,128 @@
+name: OP Kiosk OS 2.0 — small install diagnostics
+
+on:
+  push:
+    branches:
+      - op-kiosk-os-2.0-rewrite
+    paths:
+      - ".github/workflows/op-kiosk-os-2.0-debug.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: op-kiosk-os-2.0-debug
+  cancel-in-progress: true
+
+env:
+  OPKIOSK_VERSION: 2.0.0-alpha1
+  OPKIOSK_URL: http://op-arkhbum.local:3080
+
+jobs:
+  debug-install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Получение исходников
+        uses: actions/checkout@v4
+
+      - name: Освобождение места
+        shell: bash
+        run: |
+          set -Eeuxo pipefail
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet || true
+          sudo docker system prune --all --force --volumes || true
+          df -h
+
+      - name: Установка инструментов
+        shell: bash
+        run: |
+          set -Eeuxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xorriso squashfs-tools ca-certificates curl file jq \
+            qemu-system-x86 qemu-utils ovmf socat imagemagick
+          if [ -e /dev/kvm ]; then
+            sudo chmod a+rw /dev/kvm || true
+          fi
+
+      - name: Сборка ISO
+        shell: bash
+        run: |
+          set -Eeuxo pipefail
+          docker run --rm --privileged \
+            --security-opt apparmor=unconfined \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            -e OPKIOSK_VERSION \
+            -e OPKIOSK_URL \
+            debian:trixie \
+            bash -lc '
+              set -Eeuxo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                live-build debootstrap xorriso squashfs-tools dosfstools rsync \
+                ca-certificates curl gnupg file isolinux syslinux-common \
+                grub-pc-bin grub-efi-amd64-bin grub-efi-amd64-signed shim-signed \
+                mtools fdisk parted jq python3-minimal
+              chmod +x v2/*.sh v2/ci/*.sh
+              OPKIOSK_SKIP_APT=1 bash v2/build.sh
+            '
+          sudo chown -R "$USER:$USER" v2/output v2/.work
+
+      - name: Диагностический полный цикл
+        id: test
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+          ISO="v2/output/OP-Kiosk-OS-${OPKIOSK_VERSION}-amd64.iso"
+          mkdir -p v2/test-results
+          set +e
+          bash v2/ci/test-full-cycle.sh "$ISO" v2/test-results \
+            2>&1 | tee v2/test-results/workflow-console.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$rc" >v2/test-results/test-exit-code.txt
+          echo "exit_code=$rc" >>"$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Подготовка малого диагностического пакета
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuxo pipefail
+          mkdir -p v2/small-diagnostics
+          cp -f v2/output/BUILD-INFO.txt v2/small-diagnostics/ 2>/dev/null || true
+          cp -f v2/output/*.iso.sha256 v2/small-diagnostics/ 2>/dev/null || true
+          cp -rf v2/output/logs v2/small-diagnostics/build-logs 2>/dev/null || true
+          find v2/test-results -maxdepth 1 -type f \
+            \( -name '*.log' -o -name '*.txt' -o -name '*.png' -o -name '*.source-path' \) \
+            -exec cp -f {} v2/small-diagnostics/ \; 2>/dev/null || true
+          {
+            echo "TEST_EXIT_CODE=${{ steps.test.outputs.exit_code }}"
+            echo "COMMIT=${GITHUB_SHA}"
+            date -u '+UTC=%Y-%m-%dT%H:%M:%SZ'
+          } >v2/small-diagnostics/DEBUG-STATUS.txt
+          du -ah v2/small-diagnostics | sort -h | tail -n 40
+
+      - name: Загрузка малого диагностического пакета
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-2.0-small-install-diagnostics
+          path: v2/small-diagnostics
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
+
+      - name: Завершение с реальным кодом теста
+        if: always()
+        shell: bash
+        run: |
+          rc="${{ steps.test.outputs.exit_code }}"
+          test -n "$rc" || rc=99
+          exit "$rc"
