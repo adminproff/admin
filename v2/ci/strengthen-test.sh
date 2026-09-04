@@ -36,6 +36,46 @@ replace_once(
 )
 
 replace_once(
+    '''start_qemu live-bios bios "" \\
+    -boot order=d,menu=off \\
+    -drive "file=$ISO_PATH,media=cdrom,readonly=on"
+if ! wait_for_pattern "$CURRENT_SERIAL" OPKIOSK_RUNTIME_READY 420; then
+''',
+    '''start_qemu live-bios bios "" \\
+    -boot order=d,menu=off \\
+    -drive "file=$ISO_PATH,media=cdrom,readonly=on"
+# live-build оставляет меню ISOLINUX без автоматического тайм-аута.
+# В CI выбираем первый пункт так же, как пользователь нажатием Enter.
+for _ in 1 2 3; do
+    sleep 3
+    hmp 'sendkey ret' || true
+done
+if ! wait_for_pattern "$CURRENT_SERIAL" OPKIOSK_RUNTIME_READY 420; then
+''',
+    "автоматический выбор Live в BIOS",
+)
+
+replace_once(
+    '''start_qemu live-uefi uefi "$LIVE_UEFI_VARS" \\
+    -boot order=d,menu=off \\
+    -drive "file=$ISO_PATH,media=cdrom,readonly=on"
+if ! wait_for_pattern "$CURRENT_SERIAL" OPKIOSK_RUNTIME_READY 480; then
+''',
+    '''start_qemu live-uefi uefi "$LIVE_UEFI_VARS" \\
+    -boot order=d,menu=off \\
+    -drive "file=$ISO_PATH,media=cdrom,readonly=on"
+# OVMF и GRUB появляются не одновременно, поэтому Enter передаётся
+# несколько раз; после начала загрузки лишний Enter безвреден.
+for _ in 1 2 3 4; do
+    sleep 3
+    hmp 'sendkey ret' || true
+done
+if ! wait_for_pattern "$CURRENT_SERIAL" OPKIOSK_RUNTIME_READY 480; then
+''',
+    "автоматический выбор Live в UEFI",
+)
+
+replace_once(
     '''    qemu-img create -f qcow2 "$disk" 10G \\
         >"$RESULT_DIR/$install_name-qemu-img.log"
 ''',
@@ -114,5 +154,7 @@ grep -Fq 'qemu-img create -f qcow2 "$disk" 8G' "$TARGET"
 grep -Fq 'OPKIOSK_INSTALLER_SAFETY PASS' "$TARGET"
 grep -Fq 'usb-storage,drive=installmedia' "$TARGET"
 grep -Fq 'unsquashfs socat' "$TARGET"
+grep -Fq "hmp 'sendkey ret'" "$TARGET"
 
 printf 'Тест усилен: 8 ГБ, writable USB-копия ISO и обязательный safety marker.\n'
+printf 'Live-пункт автоматически выбирается в меню BIOS и UEFI.\n'
