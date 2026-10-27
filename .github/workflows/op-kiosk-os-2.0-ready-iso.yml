@@ -1,0 +1,193 @@
+name: OP Kiosk OS 2.0 — ready ISO
+
+on:
+  push:
+    branches:
+      - op-kiosk-os-2.0-rewrite
+    paths:
+      - ".github/workflows/op-kiosk-os-2.0-ready-iso.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: op-kiosk-os-2.0-ready-iso
+  cancel-in-progress: true
+
+env:
+  OPKIOSK_VERSION: 2.0.0-rc1
+  OPKIOSK_URL: http://op-arkhbum.local:3080
+  RELEASE_TAG: op-kiosk-os-2.0.0-rc1-20261027
+
+jobs:
+  build-test-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+
+    steps:
+      - name: Получение исходников
+        uses: actions/checkout@v4
+
+      - name: Освобождение места
+        shell: bash
+        run: |
+          set -Eeuxo pipefail
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet || true
+          sudo docker system prune --all --force --volumes || true
+          df -h
+
+      - name: Установка инструментов тестирования
+        shell: bash
+        run: |
+          set -Eeuxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xorriso squashfs-tools ca-certificates curl file jq \
+            qemu-system-x86 qemu-utils ovmf socat imagemagick \
+            python3 coreutils util-linux
+          if [ -e /dev/kvm ]; then
+            sudo chmod a+rw /dev/kvm || true
+          fi
+
+      - name: Сборка ISO на Debian 13
+        shell: bash
+        run: |
+          set -Eeuxo pipefail
+          docker run --rm --privileged \
+            --security-opt apparmor=unconfined \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            -e OPKIOSK_VERSION \
+            -e OPKIOSK_URL \
+            debian:trixie \
+            bash -lc '
+              set -Eeuxo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                live-build debootstrap xorriso squashfs-tools dosfstools rsync \
+                ca-certificates curl gnupg file isolinux syslinux-common \
+                grub-pc-bin grub-efi-amd64-bin grub-efi-amd64-signed shim-signed \
+                mtools fdisk parted jq python3-minimal
+              chmod +x v2/*.sh v2/ci/*.sh
+              OPKIOSK_SKIP_APT=1 bash v2/build.sh
+            '
+          sudo chown -R "$USER:$USER" v2/output v2/.work
+          ISO="v2/output/OP-Kiosk-OS-${OPKIOSK_VERSION}-amd64.iso"
+          test -s "$ISO"
+          sha256sum "$ISO" | tee "${ISO}.sha256"
+          ls -lh "$ISO" "${ISO}.sha256"
+
+      - name: Усиление полного теста
+        shell: bash
+        run: |
+          set -Eeuxo pipefail
+          chmod +x v2/ci/*.sh
+          bash v2/ci/strengthen-test.sh v2/ci/test-full-cycle.sh
+          bash -n v2/ci/test-full-cycle.sh
+
+      - name: Полный цикл BIOS и UEFI
+        id: full_test
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ISO="v2/output/OP-Kiosk-OS-${OPKIOSK_VERSION}-amd64.iso"
+          rm -rf v2/test-results
+          mkdir -p v2/test-results
+          bash v2/ci/test-full-cycle.sh "$ISO" v2/test-results \
+            2>&1 | tee v2/test-results/workflow-console.log
+
+      - name: Подготовка отчёта релиза
+        shell: bash
+        run: |
+          set -Eeuxo pipefail
+          ISO="v2/output/OP-Kiosk-OS-${OPKIOSK_VERSION}-amd64.iso"
+          SHA="$(sha256sum "$ISO" | awk '{print $1}')"
+          SIZE="$(stat -c '%s' "$ISO")"
+          cat >v2/output/OP-Kiosk-OS-${OPKIOSK_VERSION}-RELEASE-NOTES.txt <<EOF
+          OP Kiosk OS ${OPKIOSK_VERSION}
+
+          Целевая платформа: HP t530 / amd64
+          База: Debian 13 (trixie)
+          Установка: штатный Debian Installer
+          Сессия: systemd -> LightDM -> Openbox -> Chromium
+          URL по умолчанию: ${OPKIOSK_URL}
+
+          ПРОВЕРЕНО:
+          - Live BIOS: PASS
+          - Live UEFI: PASS
+          - Установка BIOS на пустой диск 8 ГБ: PASS
+          - Три холодные загрузки BIOS без ISO: PASS
+          - Установка UEFI на пустой диск 8 ГБ: PASS
+          - Три холодные загрузки UEFI без ISO: PASS
+          - Chromium и тестовая страница: PASS
+          - Ctrl+Alt+M и сервисное меню: PASS
+          - Установочный USB исключён из разметки: PASS
+
+          Размер ISO: ${SIZE} байт
+          SHA-256: ${SHA}
+          Commit: ${GITHUB_SHA}
+          Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          EOF
+          cp v2/test-results/full-cycle-report.txt \
+            v2/output/OP-Kiosk-OS-${OPKIOSK_VERSION}-FULL-CYCLE-REPORT.txt
+
+      - name: Публикация готового ISO
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuxo pipefail
+          ISO="v2/output/OP-Kiosk-OS-${OPKIOSK_VERSION}-amd64.iso"
+          SHA_FILE="${ISO}.sha256"
+          NOTES="v2/output/OP-Kiosk-OS-${OPKIOSK_VERSION}-RELEASE-NOTES.txt"
+          REPORT="v2/output/OP-Kiosk-OS-${OPKIOSK_VERSION}-FULL-CYCLE-REPORT.txt"
+
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+          fi
+
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "OP Kiosk OS ${OPKIOSK_VERSION}" \
+            --notes-file "$NOTES" \
+            --prerelease \
+            "$ISO#OP-Kiosk-OS-${OPKIOSK_VERSION}-amd64.iso" \
+            "$SHA_FILE#OP-Kiosk-OS-${OPKIOSK_VERSION}-amd64.iso.sha256" \
+            "$REPORT#OP-Kiosk-OS-${OPKIOSK_VERSION}-FULL-CYCLE-REPORT.txt" \
+            "$NOTES#OP-Kiosk-OS-${OPKIOSK_VERSION}-RELEASE-NOTES.txt"
+
+      - name: Малый диагностический пакет при ошибке
+        if: failure()
+        shell: bash
+        run: |
+          set -Eeuxo pipefail
+          rm -rf v2/failed-diagnostics
+          mkdir -p v2/failed-diagnostics
+          cp -f v2/output/BUILD-INFO.txt v2/failed-diagnostics/ 2>/dev/null || true
+          cp -f v2/output/*.sha256 v2/failed-diagnostics/ 2>/dev/null || true
+          cp -rf v2/output/logs v2/failed-diagnostics/build-logs 2>/dev/null || true
+          if [ -d v2/test-results ]; then
+            find v2/test-results -maxdepth 1 -type f \
+              \( -name '*.log' -o -name '*.txt' -o -name '*.png' -o -name '*.source-path' \) \
+              -exec cp -f {} v2/failed-diagnostics/ \; 2>/dev/null || true
+          fi
+          {
+            echo "COMMIT=${GITHUB_SHA}"
+            echo "RUN=${GITHUB_RUN_ID}"
+            date -u '+UTC=%Y-%m-%dT%H:%M:%SZ'
+          } >v2/failed-diagnostics/STATUS.txt
+          du -ah v2/failed-diagnostics | sort -h | tail -n 100
+
+      - name: Загрузка диагностики при ошибке
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP-Kiosk-OS-2.0-ready-iso-failure-diagnostics
+          path: v2/failed-diagnostics
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 6
